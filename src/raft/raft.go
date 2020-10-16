@@ -62,8 +62,8 @@ const (
 )
 
 const (
-	ElectionUpperTimeout = 600
-	ElectionLowerTimeout = 200
+	ElectionUpperTimeout = 500
+	ElectionLowerTimeout = 300
 	HeartbeatTimeout     = 80
 )
 
@@ -271,6 +271,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -344,7 +345,6 @@ func (rf *Raft) switchRole(role Role) {
 
 // Make raft great again! (Lol...)
 func (rf *Raft) initElection() {
-	DPrintf("Node %d into function initElection()", rf.me)
 
 	for {
 		rf.mu.Lock()
@@ -352,14 +352,13 @@ func (rf *Raft) initElection() {
 		// If the node has already quit the campaign, return.
 		if rf.role != Candidate {
 			rf.mu.Unlock()
-			DPrintf("Node %d exit function initElection()", rf.me)
 
 			return
 		}
 		// Before starting election, increase the current term and voted for itself
 		rf.currentTerm = rf.currentTerm + 1
 		votes := 1
-
+		total := 1
 		args := RequestVoteArgs{}
 		logLength := len(rf.log)
 
@@ -402,24 +401,26 @@ func (rf *Raft) initElection() {
 						rf.hasHeartbeat = true
 						rf.switchRole(Follower)
 						rf.mu.Unlock()
-						DPrintf("Node %d exit function initElection()", rf.me)
 						return
 					} else {
-						DPrintf("Node %d has term %d, received votes from %d", rf.me, rf.currentTerm, i)
+						DPrintf("Node %d has term %d, received votes from %d", rf.me, rf.currentTerm, index)
 						ch <- reply.VoteGranted
 					}
+				} else {
+					DPrintf("Node %d fail to receive reply from node %d", rf.me, index)
 				}
 			}(votesCh, i)
 		}
 
-		for i := 0; i < len(rf.peers); i++ {
-			// Skip itself
-			if i == rf.me {
-				continue
-			}
+		for {
+
 			r := <-votesCh
+			total++
 			if r == true {
 				votes++
+			}
+			if votes > len(rf.peers)/2 || total == len(rf.peers) || total-votes > len(rf.peers)/2 {
+				break
 			}
 		}
 
@@ -444,7 +445,7 @@ func (rf *Raft) initElection() {
 
 // This function is used to send heartbeat to all the peer nodes periodically
 func (rf *Raft) initLeaderHeartbeat() {
-	DPrintf("Node %d into function initLeaderHeartbeat()", rf.me)
+
 	for {
 		rf.mu.Lock()
 
@@ -464,7 +465,8 @@ func (rf *Raft) initLeaderHeartbeat() {
 		args.LeaderCommit = rf.commitIndex
 		// logLength := len(rf.log)
 		rf.mu.Unlock()
-		replies := 0
+		replies := 1
+		total := 1
 		repliesCh := make(chan bool, len(rf.peers))
 
 		for i := 0; i < len(rf.peers); i++ {
@@ -502,17 +504,21 @@ func (rf *Raft) initLeaderHeartbeat() {
 			}(repliesCh, i)
 		}
 
-		for i := 0; i < len(rf.peers)-1; i++ {
+		for {
 			r := <-repliesCh
+			total++
 			if r == true {
 				replies++
+			}
+			if replies > len(rf.peers)/2 || total == len(rf.peers) || total-replies > len(rf.peers)/2 {
+				break
 			}
 		}
 
 		DPrintf("Node %d received %d replies", rf.me, replies)
 		rf.mu.Lock()
 		// Not enough nodes think you are the leader
-		if replies < len(rf.peers)/2 || rf.role != Leader {
+		if replies <= len(rf.peers)/2 || rf.role != Leader {
 			DPrintf("Node %d not receiving enough replies, becoming a follower", rf.me)
 			rf.hasHeartbeat = true
 			rf.switchRole(Follower)
@@ -545,7 +551,6 @@ func (rf *Raft) updateCommitIndex() {
 }
 
 func (rf *Raft) initFollower() {
-	DPrintf("Node %d into function initFollower()", rf.me)
 
 	for {
 		rf.mu.Lock()
@@ -553,8 +558,6 @@ func (rf *Raft) initFollower() {
 		// Check if this node is still the follower
 		if rf.role != Follower {
 			rf.mu.Unlock()
-			DPrintf("Node %d exit function initFollower()", rf.me)
-
 			return
 		}
 
@@ -563,7 +566,6 @@ func (rf *Raft) initFollower() {
 		if !rf.hasHeartbeat {
 			rf.switchRole(Candidate)
 			rf.mu.Unlock()
-			DPrintf("Node %d exit function initFollower()", rf.me)
 			return
 		}
 
