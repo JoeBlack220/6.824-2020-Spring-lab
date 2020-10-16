@@ -65,6 +65,7 @@ const (
 	ElectionUpperTimeout = 500
 	ElectionLowerTimeout = 300
 	HeartbeatTimeout     = 80
+	RPCInterval          = 50
 )
 
 //
@@ -392,7 +393,6 @@ func (rf *Raft) initElection() {
 				DPrintf("Node %d tries to send a request vote to %d", rf.me, index)
 
 				ok := rf.sendRequestVote(index, &args, &reply)
-
 				if ok {
 					if reply.Term > rf.currentTerm {
 						rf.mu.Lock()
@@ -405,21 +405,23 @@ func (rf *Raft) initElection() {
 					} else {
 						DPrintf("Node %d has term %d, received votes from %d", rf.me, rf.currentTerm, index)
 						ch <- reply.VoteGranted
+						return
 					}
 				} else {
 					DPrintf("Node %d fail to receive reply from node %d", rf.me, index)
+					// Not receiving the response, sleep for a while
+					ch <- false
 				}
 			}(votesCh, i)
 		}
 
 		for {
-
 			r := <-votesCh
 			total++
 			if r == true {
 				votes++
 			}
-			if votes > len(rf.peers)/2 || total == len(rf.peers) || total-votes > len(rf.peers)/2 {
+			if votes > len(rf.peers)/2 || total == len(rf.peers) || len(rf.peers)-total+votes <= len(rf.peers)/2 {
 				break
 			}
 		}
@@ -438,6 +440,8 @@ func (rf *Raft) initElection() {
 		}
 
 		DPrintf("Node %d not receiving enough votes, end this round", rf.me)
+		rf.mu.Unlock()
+
 		timeout := time.Duration(genRand(ElectionLowerTimeout, ElectionUpperTimeout))
 		time.Sleep(time.Millisecond * timeout)
 	}
@@ -475,11 +479,8 @@ func (rf *Raft) initLeaderHeartbeat() {
 				continue
 			}
 			go func(ch chan bool, index int) {
-
 				reply := AppendEntriesReply{}
-
 				DPrintf("Node %d is sending heartbeat to %d", rf.me, index)
-
 				ok := rf.sendAppendEntries(index, &args, &reply)
 
 				if ok {
@@ -495,11 +496,13 @@ func (rf *Raft) initLeaderHeartbeat() {
 						// If the peer node accept the heartbeat of the current node.
 						// We can know the matchIndex of this peer node.
 						// rf.matchIndex[index] = reply.CommitLogIndex
+						ch <- reply.Success == 1
 					}
 				} else {
+					// Not receiving response from follower node, sleep for a while
 					DPrintf("Node %d fail to receive response from %d", rf.me, index)
+					ch <- false
 				}
-				ch <- reply.Success == 1
 
 			}(repliesCh, i)
 		}
@@ -510,7 +513,7 @@ func (rf *Raft) initLeaderHeartbeat() {
 			if r == true {
 				replies++
 			}
-			if replies > len(rf.peers)/2 || total == len(rf.peers) || total-replies > len(rf.peers)/2 {
+			if replies > len(rf.peers)/2 || total == len(rf.peers) || len(rf.peers)-total+replies <= len(rf.peers)/2 || rf.role != Leader {
 				break
 			}
 		}
