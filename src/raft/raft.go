@@ -18,15 +18,14 @@ package raft
 //
 
 import (
+	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
-	"math/rand"
-	"../labrpc"
 	"time"
-	"math"
-	"sort"
-)
 
+	"../labrpc"
+)
 
 // import "bytes"
 // import "../labgob"
@@ -57,15 +56,15 @@ type LogEntry struct {
 type Role int
 
 const (
-	Follower  Role = 0
-	Candidate Role = 1
-	Leader    Role = 2
+	Follower  Role = 1
+	Candidate Role = 2
+	Leader    Role = 3
 )
 
 const (
-	ElectionUpperTimeout  = 300 
-	ElectionLowerTimeout  = 150
-	HeartbeatTimeout = 80 
+	ElectionUpperTimeout = 600
+	ElectionLowerTimeout = 300
+	HeartbeatTimeout     = 80
 )
 
 //
@@ -92,21 +91,95 @@ type Raft struct {
 	hasHeartbeat     bool
 }
 
-func genRand(lower int,upper int) int {
+func genRand(lower int, upper int) int {
 	rand.Seed(time.Now().UnixNano())
-    return rand.Intn(upper - lower + 1) + lower
+	return rand.Intn(upper-lower+1) + lower
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
-	defer rf.mu.Unlcok()
+	defer rf.mu.Unlock()
+
+	return rf.sendHeartbeat()
+}
+
+// This will only be called by functions with outer lock
+func (rf *Raft) sendHeartbeat() (int, bool) {
 
 	var term int = rf.currentTerm
-	var isleader bool = rf.serverStatus == Leader
+	var isLeader bool = false
 
-	return term, isleader
+	if rf.role != Leader {
+		return term, isLeader
+	}
+
+	replies := 0
+	// logLength := len(rf.log)
+	for i := 0; i < len(rf.peers); i++ {
+
+		// Check precondition
+		if rf.role != Leader {
+			return term, isLeader
+		}
+		// Skip itself
+		if i == rf.me {
+			continue
+		}
+
+		// Initialize RPC arguments
+		args := AppendEntriesArgs{}
+		reply := AppendEntriesReply{}
+
+		// In this heartbeat sending process, we only need these 3 fields
+		args.Term = rf.currentTerm
+		args.LeaderId = rf.me
+		args.Entries = make([]LogEntry, 0)
+		args.LeaderCommit = rf.commitIndex
+
+		DPrintf("Node %d is sending heartbeat to %d", rf.me, i)
+
+		rf.mu.Unlock()
+		ok := rf.sendAppendEntries(i, &args, &reply)
+		rf.mu.Lock()
+		// Term may be updated during unlock
+		term = rf.currentTerm
+		// Check postcondition
+		if rf.role != Leader {
+			return term, isLeader
+		}
+
+		if ok {
+			DPrintf("Node %d receives response from %d", rf.me, i)
+
+			if reply.Term > rf.currentTerm {
+				rf.currentTerm = reply.Term
+				rf.hasHeartbeat = true
+				rf.switchRole(Follower)
+				return term, isLeader
+			} else if reply.Success == 1 {
+				replies++
+				// If the peer node accept the heartbeat of the current node.
+				// We can know the matchIndex of this peer node.
+				rf.matchIndex[i] = reply.CommitLogIndex
+			}
+		} else {
+			DPrintf("Node %d fail to receive response from %d", rf.me, i)
+		}
+	}
+	DPrintf("Node %d received %d replies", rf.me, replies)
+
+	// Not enough nodes think you are the leader
+	if replies < len(rf.peers)/2 {
+		DPrintf("Node %d not receiving enough replies, becoming a follower", rf.me)
+		rf.hasHeartbeat = true
+		rf.switchRole(Follower)
+		return term, isLeader
+	}
+
+	isLeader = true
+	return term, isLeader
 }
 
 //
@@ -190,58 +263,76 @@ type AppendEntriesReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	DPrintf("Node %d Get request from %d, his term is %d", rf.me, args.CandidateId, args.Term)
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
 	} else if args.Term == rf.currentTerm {
 		reply.Term = args.Term
-		logLength = len(rf.log)
+		logLength := len(rf.log)
 		// When the term of the candidate is the same as the current term.
 		// If the current node hasn't vote for anyone, or it has already voted for this node,
 		// and the last log's term and index is at least as updated as this node,
 		// grant the vote.
-		reply.VoteGranted = (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && 
-							(logLength == 0    || (rf.log[logLength - 1].Term <= args.LastLogTerm && rf.log[logLength - 1].Idx <= args.LastLogIndex)) 
+		reply.VoteGranted = (rf.votedFor == -1) &&
+			(rf.role == Follower) &&
+			(logLength == 0 || (rf.log[logLength-1].Term <= args.LastLogTerm && rf.log[logLength-1].Idx <= args.LastLogIndex))
+		if reply.VoteGranted {
+			DPrintf("Node %d granted request from %d, his term is %d", rf.me, args.CandidateId, args.Term)
+			rf.votedFor = args.CandidateId
+			rf.hasHeartbeat = true
+		} else {
+			DPrintf("Node %d denied request from %d, his term is %d", rf.me, args.CandidateId, args.Term)
+		}
 	} else {
+		reply.Term = args.Term
+		rf.currentTerm = args.Term
+		rf.hasHeartbeat = true
+		rf.votedFor = args.CandidateId
+		reply.VoteGranted = true
+		DPrintf("Node %d granted request from %d, his term is %d", rf.me, args.CandidateId, args.Term)
 		rf.switchRole(Follower)
 	}
 
 }
+func (rf *Raft) boot() {
+	rf.mu.Lock()
+	rf.hasHeartbeat = true
+	rf.switchRole(Follower)
+	rf.mu.Unlock()
+}
 
 // This function will only be called by other functions that have locks.
 // So we won't need to lock here again.
-func (rf *Raft) siwtchRole(Role role) {
-
-	if(rf.role == role) return
+func (rf *Raft) switchRole(role Role) {
 
 	rf.role = role
 
 	switch role {
-		// Switch to follower:
-		// Set voted for to -1, and initiate receiving heartbeats from leader
-		case Follower:
-			rf.votedFor = -1
-		// Switch to candidate:
-		// Initiate the process of asking to be a leader
-		case Candidate:
-			go rf.initElection()
-		// Switch to leader:
-		// Reset volatile fields useful for leader, and initiate the heartbeat sending process
-		case Leader:
-			logLength = len(rf.log)
-			nextIndex := logLength == 0 ? -1 : rf.log[logLength - 1].Idx
+	// Switch to follower:
+	case Follower:
+		go rf.initFollower()
+	// Switch to candidate:
+	// Initiate the process of asking to be a leader
+	case Candidate:
+		rf.votedFor = rf.me
+		go rf.initElection()
+	// Switch to leader:
+	// Reset volatile fields useful for leader, and initiate the heartbeat sending process
+	case Leader:
+		logLength := len(rf.log)
+		// nextIndex := logLength == 0 ? -1 : rf.log[logLength - 1].Idx
+		nextIndex := logLength
+		for i := 0; i < len(rf.peers); i++ {
+			rf.nextIndex[i] = nextIndex + 1
+		}
 
-			for i := 0; i < len(rf.peers); i++ {
-				rf.nextIndex[i] = lastLogIndex + 1
-			}
-
-			rf.matchIndex = make([]int, len(rf.peers))
-			rf.matchIndex[rf.me] = lastLogIndex
-			go rf.initLeaderHeartbeat()
+		rf.matchIndex = make([]int, len(rf.peers))
+		rf.matchIndex[rf.me] = nextIndex
+		go rf.initLeaderHeartbeat()
 	}
 }
 
@@ -249,15 +340,17 @@ func (rf *Raft) siwtchRole(Role role) {
 func (rf *Raft) initElection() {
 	for {
 		rf.mu.Lock()
-		// Before starting election, increase the current term and voted for itself
-		rf.currentTerm = rf.currentTerm + 1
-		votes := 1
 
 		// If the node has already quit the campaign, return.
 		if rf.role != Candidate {
 			rf.mu.Unlock()
 			return
-		} 
+		}
+		// Before starting election, increase the current term and voted for itself
+		rf.currentTerm = rf.currentTerm + 1
+		votes := 1
+
+		DPrintf("Node %d is a %d, and it starts an election, its term is %d", rf.me, rf.role, rf.currentTerm)
 
 		for i := 0; i < len(rf.peers); i++ {
 			// Skip itself
@@ -269,34 +362,56 @@ func (rf *Raft) initElection() {
 			args := RequestVoteArgs{}
 			reply := RequestVoteReply{}
 
-			logLength = len(rf.log)
+			logLength := len(rf.log)
 
 			args.Term = rf.currentTerm
 			args.CandidateId = rf.me
 
 			// Avoid out of bound visits
-			args.LastLogIndex = logLength == 0 ? -1 : rf.log[logLength - 1].Idx
-			args.LastLogTerm = logLength == 0 ? -1 : rf.log[logLength - 1].Term
+			// args.LastLogIndex = logLength == 0 ? -1 : rf.log[logLength - 1].Idx
+			args.LastLogIndex = logLength
 
-			ok := sendRPC(i, "Raft.RequestVote", &args, &reply);
+			if logLength == 0 {
+				args.LastLogTerm = rf.currentTerm
+			} else {
+				args.LastLogIndex = rf.log[logLength-1].Term
+			}
 
-			if(ok) {
+			DPrintf("Node %d tries to send a request vote to %d", rf.me, i)
+			rf.mu.Unlock()
+			ok := rf.sendRequestVote(i, &args, &reply)
+			rf.mu.Lock()
+
+			if rf.role != Candidate {
+				rf.mu.Unlock()
+				return
+			}
+
+			if ok {
 				if reply.Term > rf.currentTerm {
+					DPrintf("Node %d has term %d, but it received higher term %d when elect from %d", rf.me, rf.currentTerm, reply.Term, i)
+					rf.currentTerm = reply.Term
+					rf.hasHeartbeat = true
 					rf.switchRole(Follower)
 					rf.mu.Unlock()
 					return
 				} else if reply.VoteGranted {
 					votes++
-					if votes > len(rf.peers) / 2 + 1 {
+					DPrintf("Node %d has term %d, received votes from %d", rf.me, rf.currentTerm, i)
+					if votes >= len(rf.peers)/2+1 {
+						DPrintf("Node %d has term %d, received %d votes, became leader", rf.me, rf.currentTerm, votes)
 						rf.switchRole(Leader)
 						rf.mu.Unlock()
 						return
 					}
 				}
 			}
+
 		}
 		rf.mu.Unlock()
-		time.Sleep(genRand(ElectionLowerTimeout, ElectionUpperTimeout) * time.Millisecond)
+		DPrintf("Node %d not receiving enough votes, end this round", rf.me)
+		timeout := time.Duration(genRand(ElectionLowerTimeout, ElectionUpperTimeout))
+		time.Sleep(time.Millisecond * timeout)
 	}
 }
 
@@ -304,44 +419,13 @@ func (rf *Raft) initElection() {
 func (rf *Raft) initLeaderHeartbeat() {
 	for {
 		rf.mu.Lock()
+		DPrintf("Node %d is a %d, its term is %d, it should be a leader", rf.me, rf.role, rf.currentTerm)
+		_, isLeader := rf.sendHeartbeat()
 
-		// Check if this node is still the leader
-		if rf.role != Leader {
+		if !isLeader {
+			DPrintf("Node %d is no longer a leader, switch to a follower", rf.me)
 			rf.mu.Unlock()
 			return
-		}
-
-		
-		for i := 0; i < len(rf.peers); i++ {
-
-			// Skip itself
-			if i == rf.me {
-				continue
-			}
-
-			// Initialize RPC arguments
-			args := AppendEntriesArgs{}
-			reply := AppendEntriesReply{}
-
-			// In this heartbeat sending process, we only need these 3 fields
-			args.Term = rf.currentTerm
-			args.LeaderId = rf.me
-			args.Entries = []
-			args.LeaderCommit = rf.commitIndex
-
-			ok := sendRPC(i, "Raft.AppendEntries", &args, &reply);
-
-			if(ok) {
-				if reply.Term > rf.currentTerm {
-					rf.switchRole(Follower)
-					rf.mu.Unlock()
-					return
-				} else if reply.Success {
-					// If the peer node accept the heartbeat of the current node.
-					// We can know the matchIndex of this peer node.
-					rf.matchIndex[i] = reply.CommitLogIndex
-				}
-			}
 		}
 
 		rf.updateCommitIndex()
@@ -355,15 +439,15 @@ func (rf *Raft) initLeaderHeartbeat() {
 // use that maximum index as the current commitIndex of the leader.
 // This utility function can only be called by other functions with synchronization mechanisms,
 // so we don't need to lock here.
-func (rf *Raft) updateCommitIndex {
-	tmp := make([]string, len(rf.matchIndex))
+func (rf *Raft) updateCommitIndex() {
+	tmp := make([]int, len(rf.matchIndex))
 
 	copy(tmp, rf.matchIndex)
 	sort.Ints(tmp)
 	// tmp[len(tmp) / 2] is the value that most of nodes are greater or equal to
-	newIndex := tmp[len(tmp) / 2]
+	newIndex := tmp[len(tmp)/2]
 
-	if rf.logs[newIndex].Term == rf.currentTerm {
+	if newIndex == 0 || rf.log[newIndex].Term == rf.currentTerm {
 		rf.commitIndex = newIndex
 	}
 }
@@ -372,17 +456,19 @@ func (rf *Raft) initFollower() {
 	for {
 		rf.mu.Lock()
 
-		// Check if this node is still the leader
+		// Check if this node is still the follower
 		if rf.role != Follower {
 			rf.mu.Unlock()
 			return
 		}
 
+		DPrintf("Node %d is a %d, its term is %d, it should be a follower", rf.me, rf.role, rf.currentTerm)
+
 		if !rf.hasHeartbeat {
 			rf.switchRole(Candidate)
 			rf.mu.Unlock()
 			return
-		} 
+		}
 
 		rf.hasHeartbeat = false
 		rf.mu.Unlock()
@@ -390,31 +476,33 @@ func (rf *Raft) initFollower() {
 	}
 }
 
-func (rf* Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+// Stopped here for 10/14
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
-		reply.Success = false
-		rf.mu.Unlock()
+		reply.Success = 0
 		return
 	} else {
+		rf.hasHeartbeat = true
+		rf.currentTerm = args.Term
 		rf.switchRole(Follower)
-
 		// Sent an empty entries array, so this request is just for heartbeat
 		if len(args.Entries) == 0 {
-			rf.hasHeartbeat = true
+			DPrintf("Node %d receives heartbeat from server %d", rf.me, args.LeaderId)
 			reply.Term = rf.currentTerm
-			reply.Success = true
+			reply.Success = 1
+			reply.CommitLogIndex = rf.commitIndex
+			return
 		}
-		// copy from the very beginning
-		if PrevLogIndex == -1 {
-			Term           int
-			Success        int
-			CommitLogIndex int
-		}
+		// // copy from the very beginning
+		// if PrevLogIndex == -1 {
+
+		// }
 	}
 }
+
 //
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
@@ -450,8 +538,8 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 // A more universal version compared to the example code
-func (rf *Raft) sendRPC(server int, funcName string, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call(funcName, args, reply)
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -511,6 +599,7 @@ func (rf *Raft) killed() bool {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
+
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
@@ -519,9 +608,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.log = make([]LogEntry, 0)
+	rf.commitIndex = 0
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
+	rf.hasHeartbeat = false
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	rf.boot()
 	return rf
 }

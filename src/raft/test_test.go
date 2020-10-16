@@ -8,47 +8,48 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
-func TestInitialElection2A(t *testing.T) {
-	servers := 3
-	cfg := make_config(t, servers, false)
-	defer cfg.cleanup()
+// func TestInitialElection2A(t *testing.T) {
+// 	servers := 3
+// 	cfg := make_config(t, servers, false)
+// 	defer cfg.cleanup()
 
-	cfg.begin("Test (2A): initial election")
+// 	cfg.begin("Test (2A): initial election")
 
-	// is a leader elected?
-	cfg.checkOneLeader()
+// 	// is a leader elected?
+// 	cfg.checkOneLeader()
 
-	// sleep a bit to avoid racing with followers learning of the
-	// election, then check that all peers agree on the term.
-	time.Sleep(50 * time.Millisecond)
-	term1 := cfg.checkTerms()
-	if term1 < 1 {
-		t.Fatalf("term is %v, but should be at least 1", term1)
-	}
+// 	// sleep a bit to avoid racing with followers learning of the
+// 	// election, then check that all peers agree on the term.
+// 	time.Sleep(50 * time.Millisecond)
+// 	term1 := cfg.checkTerms()
+// 	if term1 < 1 {
+// 		t.Fatalf("term is %v, but should be at least 1", term1)
+// 	}
 
-	// does the leader+term stay the same if there is no network failure?
-	time.Sleep(2 * RaftElectionTimeout)
-	term2 := cfg.checkTerms()
-	if term1 != term2 {
-		fmt.Printf("warning: term changed even though there were no failures")
-	}
+// 	// does the leader+term stay the same if there is no network failure?
+// 	time.Sleep(2 * RaftElectionTimeout)
+// 	term2 := cfg.checkTerms()
+// 	if term1 != term2 {
+// 		fmt.Printf("warning: term changed even though there were no failures")
+// 	}
 
-	// there should still be a leader.
-	cfg.checkOneLeader()
+// 	// there should still be a leader.
+// 	cfg.checkOneLeader()
 
-	cfg.end()
-}
+// 	cfg.end()
+// }
 
 func TestReElection2A(t *testing.T) {
 	servers := 3
@@ -59,25 +60,33 @@ func TestReElection2A(t *testing.T) {
 
 	leader1 := cfg.checkOneLeader()
 
+	DPrintf("Disconnect %d", leader1)
+
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
+	DPrintf("Connect again %d", leader1)
+
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no leader should
 	// be elected.
+	DPrintf("Disconnect %d and %d", leader2, (leader2+1)%servers)
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 
+	DPrintf("Connect again %d", (leader2+1)%servers)
+
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
+	DPrintf("Connect again %d", leader2)
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
