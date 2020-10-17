@@ -106,87 +106,6 @@ func (rf *Raft) GetState() (int, bool) {
 	return rf.currentTerm, rf.role == Leader
 }
 
-// This will only be called by functions with outer lock
-// func (rf *Raft) sendHeartbeat() {
-
-// 	var term int = rf.currentTerm
-// 	var isLeader bool = false
-
-// 	if rf.role != Leader {
-// 		return term, isLeader
-// 	}
-
-// 	args := AppendEntriesArgs{}
-
-// 	// In this heartbeat sending process, we only need these 3 fields
-// 	args.Term = rf.currentTerm
-// 	args.LeaderId = rf.me
-// 	args.Entries = make([]LogEntry, 0)
-// 	args.LeaderCommit = rf.commitIndex
-// 	// logLength := len(rf.log)
-// 	rf.mu.Unlock()
-// 	replies := 0
-// 	repliesCh := make(chan bool, len(rf.peers))
-
-// 	for i := 0; i < len(rf.peers); i++ {
-// 		// Skip itself
-// 		if i == rf.me {
-// 			continue
-// 		}
-// 		go func(ch chan bool, index int) {
-
-// 			reply := AppendEntriesReply{}
-
-// 			DPrintf("Node %d is sending heartbeat to %d", rf.me, index)
-
-// 			ok := rf.sendAppendEntries(index, &args, &reply)
-
-// 			if ok {
-// 				DPrintf("Node %d receives response from %d", rf.me, index)
-// 				if reply.Term > rf.currentTerm {
-// 					rf.mu.Lock()
-// 					rf.currentTerm = reply.Term
-// 					rf.hasHeartbeat = true
-// 					rf.switchRole(Follower)
-// 					term = rf.currentTerm
-// 					isLeader = false
-// 					rf.mu.Unlock()
-// 					return
-// 				} else {
-// 					// If the peer node accept the heartbeat of the current node.
-// 					// We can know the matchIndex of this peer node.
-// 					// rf.matchIndex[index] = reply.CommitLogIndex
-// 				}
-// 			} else {
-// 				DPrintf("Node %d fail to receive response from %d", rf.me, index)
-// 			}
-// 			ch <- reply.Success == 1
-
-// 		}(repliesCh, i)
-// 	}
-
-// 	for i := 0; i < len(rf.peers)-1; i++ {
-// 		r := <-repliesCh
-// 		if r == true {
-// 			replies++
-// 		}
-// 	}
-
-// 	DPrintf("Node %d received %d replies", rf.me, replies)
-
-// 	// Not enough nodes think you are the leader
-// 	if replies < len(rf.peers)/2 || rf.role != Leader {
-// 		rf.mu.Lock()
-// 		DPrintf("Node %d not receiving enough replies, becoming a follower", rf.me)
-// 		rf.hasHeartbeat = true
-// 		rf.switchRole(Follower)
-// 		return term, isLeader
-// 	}
-
-// 	isLeader = true
-// 	return term, isLeader
-// }
-
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -317,6 +236,7 @@ func (rf *Raft) switchRole(role Role) {
 	if rf.role == role {
 		return
 	}
+
 	rf.role = role
 
 	switch role {
@@ -366,15 +286,7 @@ func (rf *Raft) initElection() {
 		args.Term = rf.currentTerm
 		args.CandidateId = rf.me
 
-		// Avoid out of bound visits
-		// args.LastLogIndex = logLength == 0 ? -1 : rf.log[logLength - 1].Idx
-		args.LastLogIndex = logLength
-
-		if logLength == 0 {
-			args.LastLogTerm = rf.currentTerm
-		} else {
-			args.LastLogIndex = rf.log[logLength-1].Term
-		}
+		args.LastLogIndex = rf.log[logLength-1].Idx
 
 		DPrintf("Node %d is a %d, and it starts an election, its term is %d", rf.me, rf.role, rf.currentTerm)
 		rf.mu.Unlock()
@@ -449,7 +361,6 @@ func (rf *Raft) initElection() {
 
 // This function is used to send heartbeat to all the peer nodes periodically
 func (rf *Raft) initLeaderHeartbeat() {
-
 	for {
 		rf.mu.Lock()
 
@@ -460,14 +371,13 @@ func (rf *Raft) initLeaderHeartbeat() {
 			return
 		}
 
-		args := AppendEntriesArgs{}
+		args := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			Entries:      make([]LogEntry, 0),
+			LeaderCommit: rf.commitIndex,
+		}
 
-		// In this heartbeat sending process, we only need these 3 fields
-		args.Term = rf.currentTerm
-		args.LeaderId = rf.me
-		args.Entries = make([]LogEntry, 0)
-		args.LeaderCommit = rf.commitIndex
-		// logLength := len(rf.log)
 		rf.mu.Unlock()
 		replies := 1
 		total := 1
@@ -714,14 +624,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.log = make([]LogEntry, 0)
+
+	// rf.log's index should be 1 based
+	// Used a dumb log entry to avoid out of index error
+	rf.log = make([]LogEntry, 1)
+	rf.log[0] = LogEntry{Term: 0, Idx: 0}
 	rf.commitIndex = 0
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 	rf.hasHeartbeat = false
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 	rf.boot()
 	return rf
 }
