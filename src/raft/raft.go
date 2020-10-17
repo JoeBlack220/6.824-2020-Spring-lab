@@ -223,12 +223,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 }
-func (rf *Raft) boot() {
-	rf.mu.Lock()
-	rf.hasHeartbeat = true
-	rf.switchRole(Follower)
-	rf.mu.Unlock()
-}
 
 // This function will only be called by other functions that have locks.
 // So we won't need to lock here again.
@@ -242,7 +236,6 @@ func (rf *Raft) switchRole(role Role) {
 	switch role {
 	// Switch to follower:
 	case Follower:
-		// go rf.initFollower()
 	// Switch to candidate:
 	// Initiate the process of asking to be a leader
 	case Candidate:
@@ -619,13 +612,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Used a dumb log entry to avoid out of index error
 	rf.log = make([]LogEntry, 1)
 	rf.log[0] = LogEntry{Term: 0, Idx: 0}
+
 	rf.commitIndex = 0
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
-	rf.hasHeartbeat = false
-	go rf.checkElectionTimeout()
+	rf.role = Follower
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	rf.boot()
+	go rf.checkElectionTimeout()
+
 	return rf
 }
