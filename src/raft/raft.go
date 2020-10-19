@@ -62,7 +62,7 @@ const (
 )
 
 const (
-	ElectionUpperTimeout = 500
+	ElectionUpperTimeout = 600
 	ElectionLowerTimeout = 300
 	HeartbeatTimeout     = 80
 	RPCInterval          = 50
@@ -190,7 +190,7 @@ type AppendEntriesReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	DPrintf("Node %d Get request from %d, his term is %d", rf.me, args.CandidateId, args.Term)
+	DPrintf("Node %d get request from %d, his term is %d", rf.me, args.CandidateId, args.Term)
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -200,14 +200,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 	} else if args.Term == rf.currentTerm {
 		reply.Term = args.Term
-		logLength := len(rf.log)
 		// When the term of the candidate is the same as the current term.
 		// If the current node hasn't vote for anyone, or it has already voted for this node,
 		// and the last log's term and index is at least as updated as this node,
 		// grant the vote.
 		reply.VoteGranted = (rf.votedFor == -1) &&
 			(rf.role == Follower) &&
-			(logLength == 0 || (rf.log[logLength-1].Term <= args.LastLogTerm && rf.log[logLength-1].Idx <= args.LastLogIndex))
+			(rf.getLastIndex() <= args.LastLogIndex && rf.log[rf.getLastIndex()].Term <= args.LastLogTerm)
 		if reply.VoteGranted {
 			DPrintf("Node %d granted request from %d, his term is %d", rf.me, args.CandidateId, args.Term)
 			rf.votedFor = args.CandidateId
@@ -218,11 +217,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else {
 		reply.Term = args.Term
 		rf.currentTerm = args.Term
-		rf.hasHeartbeat = true
 		rf.votedFor = args.CandidateId
-		reply.VoteGranted = true
-		DPrintf("Node %d granted request from %d, his term is %d", rf.me, args.CandidateId, args.Term)
-		rf.switchRole(Follower)
+		reply.VoteGranted = rf.getLastIndex() <= args.LastLogIndex && rf.log[rf.getLastIndex()].Term <= args.LastLogTerm
+		if reply.VoteGranted {
+			rf.hasHeartbeat = true
+
+			DPrintf("Node %d granted request from %d, his term is %d", rf.me, args.CandidateId, args.Term)
+
+			rf.switchRole(Follower)
+		} else {
+			DPrintf("Node %d don't grant request from %d, since its entry is not updated", rf.me, args.CandidateId)
+		}
 	}
 
 }
@@ -233,9 +238,9 @@ func (rf *Raft) switchRole(role Role) {
 	if rf.role == role {
 		return
 	}
+	DPrintf("Node %d switches from %d to %d", rf.me, rf.role, role)
 
 	rf.role = role
-
 	switch role {
 	// Switch to follower:
 	case Follower:
@@ -264,7 +269,6 @@ func (rf *Raft) initUpdateEntries() {
 	for i := 0; i < len(rf.peers); i++ {
 		go func(index int) {
 			for {
-
 				rf.mu.Lock()
 				if rf.role != Leader {
 					rf.mu.Unlock()
@@ -280,10 +284,18 @@ func (rf *Raft) initUpdateEntries() {
 						PrevLogIndex: rf.matchIndex[index],
 						PrevLogTerm:  rf.log[rf.matchIndex[index]].Term,
 					}
+					rf.mu.Unlock()
+
 					reply := AppendEntriesReply{}
 
 					ok := rf.sendAppendEntries(index, &args, &reply)
 
+					rf.mu.Lock()
+
+					if rf.role != Leader {
+						rf.mu.Unlock()
+						return
+					}
 					if ok {
 						if reply.Term > rf.currentTerm {
 							rf.switchRole(Follower)
@@ -358,6 +370,7 @@ func (rf *Raft) initElection() {
 		Term:         rf.currentTerm,
 		CandidateId:  rf.me,
 		LastLogIndex: rf.getLastIndex(),
+		LastLogTerm:  rf.log[rf.getLastIndex()].Term,
 	}
 
 	DPrintf("Node %d is a %d, and it starts an election, its term is %d", rf.me, rf.role, rf.currentTerm)
@@ -519,12 +532,13 @@ func (rf *Raft) initLeaderHeartbeat() {
 
 		// Not enough nodes think you are the leader
 		if replies <= len(rf.peers)/2 || rf.role != Leader {
-			DPrintf("Node %d not receiving enough replies, becoming a follower", rf.me)
+			DPrintf("Node %d not receiving enough replies (%d), becoming a follower (role is %d)", rf.me, replies, rf.role)
 			rf.hasHeartbeat = true
 			rf.switchRole(Follower)
 			rf.mu.Unlock()
 			return
 		}
+		DPrintf("Node %d receives enough replies, still a leader", rf.me)
 
 		rf.updateCommitIndex()
 		rf.mu.Unlock()
@@ -596,7 +610,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 					if args.LeaderCommit > rf.commitIndex {
 						rf.commitIndex = Min(args.LeaderCommit, reply.LastLogIndex)
 					}
-					DPrintf("Node %d successfully append entries from server %d, its entries %v", rf.me, args.LeaderId, rf.log)
+					DPrintf("Node %d successfully receives append entries from server %d, its entries %v", rf.me, args.LeaderId, rf.log)
 
 				} else {
 					rf.log = rf.log[:args.PrevLogIndex]
@@ -686,6 +700,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Idx:     index,
 		})
 		rf.matchIndex[rf.me] = index
+		DPrintf("Node %d is the leader and ends inserting the new entry %d", rf.me, index)
+
 	}
 
 	return index, term, isLeader
