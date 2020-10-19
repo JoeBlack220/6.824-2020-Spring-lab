@@ -206,7 +206,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// grant the vote.
 		reply.VoteGranted = (rf.votedFor == -1) &&
 			(rf.role == Follower) &&
-			(rf.getLastIndex() <= args.LastLogIndex && rf.log[rf.getLastIndex()].Term <= args.LastLogTerm)
+			(args.LastLogTerm > rf.getLastTerm() ||
+				(rf.getLastIndex() <= args.LastLogIndex && rf.log[rf.getLastIndex()].Term == args.LastLogTerm))
 		if reply.VoteGranted {
 			DPrintf("Node %d granted request from %d, his term is %d", rf.me, args.CandidateId, args.Term)
 			rf.votedFor = args.CandidateId
@@ -218,7 +219,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = args.Term
 		rf.currentTerm = args.Term
 		rf.votedFor = args.CandidateId
-		reply.VoteGranted = rf.getLastIndex() <= args.LastLogIndex && rf.log[rf.getLastIndex()].Term <= args.LastLogTerm
+		reply.VoteGranted = args.LastLogTerm > rf.getLastTerm() ||
+			(rf.getLastIndex() <= args.LastLogIndex && rf.log[rf.getLastIndex()].Term == args.LastLogTerm)
 		if reply.VoteGranted {
 			rf.hasHeartbeat = true
 
@@ -347,6 +349,10 @@ func (rf *Raft) applyToCommit() {
 
 func (rf *Raft) getLastIndex() int {
 	return rf.log[len(rf.log)-1].Idx
+}
+
+func (rf *Raft) getLastTerm() int {
+	return rf.log[len(rf.log)-1].Term
 }
 
 // Make raft great again! (Lol...)
